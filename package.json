@@ -3,10 +3,10 @@
   "displayName": "Sentry Auto Fix",
   "description": "View Sentry issues in Cursor/VSCode and generate AI-powered fix prompts with full context",
   "version": "0.0.1",
-  "publisher": "your-publisher-name",
+  "publisher": "rseyferth",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/sentry-auto-pr-mcp"
+    "url": "https://github.com/rseyferth/sentry-auto-pr-vscode"
   },
   "keywords": [
     "sentry",
@@ -17,7 +17,6 @@
     "bug fix",
     "mcp"
   ],
-  "icon": "resources/sentry-icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },

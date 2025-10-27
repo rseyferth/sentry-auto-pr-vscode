@@ -143,18 +143,46 @@ export function activate(context: vscode.ExtensionContext) {
 async function initializeSentry() {
   const config = getConfiguration();
 
-  if (
-    !config.sentryUrl ||
-    !config.apiToken ||
-    config.projectSlugs.length === 0
-  ) {
+  const isConfigValid =
+    config.sentryUrl && config.apiToken && config.projectSlugs.length > 0;
+
+  // Always create webview provider (even if not configured)
+  if (!webviewProvider) {
+    webviewProvider = new SentryWebViewProvider(
+      extensionContext.extensionUri,
+      null, // Pass null if not configured
+      extensionContext
+    );
+    extensionContext.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(
+        SentryWebViewProvider.viewType,
+        webviewProvider
+      )
+    );
+
+    // Start background refresh (every 5 minutes) - only when configured
+    const refreshInterval = setInterval(() => {
+      if (webviewProvider && sentryClient) {
+        webviewProvider.loadIssues(true); // true = background refresh
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+
+    extensionContext.subscriptions.push({
+      dispose: () => clearInterval(refreshInterval),
+    });
+  }
+
+  if (!isConfigValid) {
     statusBarItem.text = "$(warning) Sentry Not Configured";
     statusBarItem.tooltip = "Click to configure Sentry settings";
     statusBarItem.command = "workbench.action.openSettings";
     statusBarItem.show();
 
     sentryClient = null;
-    webviewProvider = null;
+    // Notify webview that configuration is missing
+    if (webviewProvider) {
+      webviewProvider.updateClient(null);
+    }
     return;
   }
 
@@ -165,30 +193,9 @@ async function initializeSentry() {
     sentryClient = new SentryClient(config);
   }
 
-  // Create or update webview provider
-  if (!webviewProvider) {
-    webviewProvider = new SentryWebViewProvider(
-      extensionContext.extensionUri,
-      sentryClient,
-      extensionContext
-    );
-    extensionContext.subscriptions.push(
-      vscode.window.registerWebviewViewProvider(
-        SentryWebViewProvider.viewType,
-        webviewProvider
-      )
-    );
-
-    // Start background refresh (every 5 minutes)
-    const refreshInterval = setInterval(() => {
-      if (webviewProvider) {
-        webviewProvider.loadIssues(true); // true = background refresh
-      }
-    }, 5 * 60 * 1000); // 5 minutes
-
-    extensionContext.subscriptions.push({
-      dispose: () => clearInterval(refreshInterval),
-    });
+  // Update webview provider with the new client
+  if (webviewProvider) {
+    webviewProvider.updateClient(sentryClient);
   }
 
   // Create or update MCP server

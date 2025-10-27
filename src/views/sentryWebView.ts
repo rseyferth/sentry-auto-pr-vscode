@@ -10,11 +10,29 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
-    private sentryClient: SentryClient,
+    private sentryClient: SentryClient | null,
     private context: vscode.ExtensionContext
   ) {
-    // Load cached issues on startup
-    this.loadFromCache();
+    // Load cached issues on startup only if client is configured
+    if (this.sentryClient) {
+      this.loadFromCache();
+    }
+  }
+
+  public updateClient(client: SentryClient | null): void {
+    this.sentryClient = client;
+    if (client) {
+      // Client was configured, try to load issues
+      this.loadIssues(false);
+    } else {
+      // Client was removed/unconfigured, show config message
+      this.showConfigurationMessage();
+    }
+  }
+
+  private showConfigurationMessage(): void {
+    this.issuesByProject.clear();
+    this.refresh();
   }
 
   public resolveWebviewView(
@@ -69,11 +87,24 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
           }
           break;
         }
+        case "openSettings": {
+          vscode.commands.executeCommand(
+            "workbench.action.openSettings",
+            "sentryAutoFix"
+          );
+          break;
+        }
       }
     });
   }
 
   public async loadIssues(background: boolean = false): Promise<void> {
+    if (!this.sentryClient) {
+      // Show configuration message instead
+      this.showConfigurationMessage();
+      return;
+    }
+
     try {
       this.isLoading = true;
       if (!background) {
@@ -105,6 +136,13 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async resolveIssue(issueId: string): Promise<void> {
+    if (!this.sentryClient) {
+      vscode.window.showWarningMessage(
+        "Sentry is not configured. Please configure your settings first."
+      );
+      return;
+    }
+
     try {
       // Send loading state to webview
       this._view?.webview.postMessage({
@@ -114,7 +152,7 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
 
       await this.sentryClient.resolveIssue(issueId);
 
-      vscode.window.showInformationMessage("✅ Issue resolved in next release");
+      vscode.window.showInformationMessage(" Issue resolved in next release");
 
       // Wait a moment for Sentry to update, then refresh
       setTimeout(async () => {
@@ -177,6 +215,7 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
         type: "updateIssues",
         issues: this.serializeIssues(),
         isLoading: this.isLoading,
+        isConfigured: this.sentryClient !== null,
       });
     }
   }
@@ -618,6 +657,94 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
       border-bottom: 1px solid var(--vscode-panel-border);
       opacity: 0.9;
     }
+
+    .config-message {
+      padding: 32px 24px;
+      text-align: center;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    .config-icon {
+      font-size: 64px;
+      margin-bottom: 24px;
+      opacity: 0.6;
+    }
+
+    .config-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .config-description {
+      font-size: 13px;
+      opacity: 0.8;
+      margin-bottom: 32px;
+      line-height: 1.5;
+    }
+
+    .config-steps {
+      text-align: left;
+      margin-bottom: 32px;
+    }
+
+    .config-step {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 20px;
+      align-items: flex-start;
+    }
+
+    .step-number {
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .step-content {
+      flex: 1;
+    }
+
+    .step-content strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .step-content p {
+      font-size: 12px;
+      opacity: 0.8;
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    .btn-config {
+      padding: 10px 20px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+
+    .btn-config:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
   </style>
 </head>
 <body>
@@ -667,6 +794,12 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
     window.addEventListener('message', event => {
       const message = event.data;
       if (message.type === 'updateIssues') {
+        // Check if configured
+        if (message.isConfigured === false) {
+          showConfigurationMessage();
+          return;
+        }
+        
         allIssues = message.issues;
         filteredProjects = new Set(allIssues.map(p => p.project));
         updateProjectFilter();
@@ -965,6 +1098,59 @@ export class SentryWebViewProvider implements vscode.WebviewViewProvider {
       const div = document.createElement('div');
       div.textContent = text;
       return div.innerHTML;
+    }
+
+    function showConfigurationMessage() {
+      const container = document.getElementById('issuesContainer');
+      const statsDiv = document.getElementById('stats');
+      
+      container.innerHTML = \`
+        <div class="config-message">
+          <div class="config-icon">
+            <i class="fas fa-gear"></i>
+          </div>
+          <h2 class="config-title">Welcome to Sentry Auto Fix!</h2>
+          <p class="config-description">
+            To get started, you need to configure your Sentry connection settings.
+          </p>
+          
+          <div class="config-steps">
+            <div class="config-step">
+              <div class="step-number">1</div>
+              <div class="step-content">
+                <strong>Sentry URL</strong>
+                <p>Enter your Sentry instance URL (e.g., https://sentry.io)</p>
+              </div>
+            </div>
+            
+            <div class="config-step">
+              <div class="step-number">2</div>
+              <div class="step-content">
+                <strong>API Token</strong>
+                <p>Create an authentication token in your Sentry settings</p>
+              </div>
+            </div>
+            
+            <div class="config-step">
+              <div class="step-number">3</div>
+              <div class="step-content">
+                <strong>Project Slugs</strong>
+                <p>Add your project slugs (format: organization/project)</p>
+              </div>
+            </div>
+          </div>
+          
+          <button class="btn-config" onclick="openSettings()">
+            <i class="fas fa-cog"></i> Open Settings
+          </button>
+        </div>
+      \`;
+      
+      statsDiv.textContent = 'Not configured';
+    }
+
+    function openSettings() {
+      vscode.postMessage({ type: 'openSettings' });
     }
 
     // Request initial data
