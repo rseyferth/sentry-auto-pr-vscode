@@ -1,0 +1,132 @@
+{
+  "name": "sentry-auto-fix",
+  "displayName": "Sentry Auto Fix",
+  "description": "View Sentry issues in Cursor/VSCode and generate AI-powered fix prompts with full context",
+  "version": "0.0.1",
+  "publisher": "your-publisher-name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/sentry-auto-pr-mcp"
+  },
+  "keywords": [
+    "sentry",
+    "error tracking",
+    "debugging",
+    "ai",
+    "cursor",
+    "bug fix",
+    "mcp"
+  ],
+  "icon": "resources/sentry-icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Debuggers",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "bin": {
+    "sentry-mcp": "./dist/mcp-entry.js"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Sentry Auto Fix",
+      "properties": {
+        "sentryAutoFix.sentryUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL for your self-hosted Sentry instance (e.g., https://sentry.example.com)"
+        },
+        "sentryAutoFix.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Sentry API authentication token"
+        },
+        "sentryAutoFix.projectSlugs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Array of project slugs to monitor (format: 'organization/project')"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sentry-issues",
+          "title": "Sentry Issues",
+          "icon": "$(bug)"
+        }
+      ]
+    },
+    "views": {
+      "sentry-issues": [
+        {
+          "id": "sentryIssuesView",
+          "name": "Issues",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "sentryAutoFix.refreshIssues",
+        "title": "Refresh Issues",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sentryAutoFix.fixWithAI",
+        "title": "Fix this issue using AI"
+      },
+      {
+        "command": "sentryAutoFix.openIssueInBrowser",
+        "title": "Open Issue in Sentry"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sentryAutoFix.refreshIssues",
+          "when": "view == sentryIssuesView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sentryAutoFix.fixWithAI",
+          "when": "view == sentryIssuesView && viewItem == issue"
+        },
+        {
+          "command": "sentryAutoFix.openIssueInBrowser",
+          "when": "view == sentryIssuesView && viewItem == issue"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.x",
+    "@typescript-eslint/parser": "^6.x",
+    "esbuild": "^0.19.0",
+    "eslint": "^8.x",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "@modelcontextprotocol/sdk": "^0.5.0"
+  }
+}
