@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
-import { SentryClient } from "./sentry/client";
+import { SentryMCPServer } from "./mcp/server";
+import { StoreManager } from "./stores/storeManager";
 import { SentryWebViewProvider } from "./views/sentryWebView";
 import { FixWithAICommand } from "./commands/fixWithAI";
 import { SentryConfig } from "./sentry/types";
-import { SentryMCPServer } from "./mcp/server";
+import { ClickUpConfig } from "./clickup/types";
 
-let sentryClient: SentryClient | null = null;
+let storeManager: StoreManager | null = null;
 let webviewProvider: SentryWebViewProvider | null = null;
 let mcpServer: SentryMCPServer | null = null;
 let statusBarItem: vscode.StatusBarItem;
@@ -14,7 +15,6 @@ let extensionContext: vscode.ExtensionContext;
 export function activate(context: vscode.ExtensionContext) {
   console.log("Sentry Auto Fix extension is now active");
 
-  // Store context for use in other functions
   extensionContext = context;
 
   // Create status bar item
@@ -25,10 +25,8 @@ export function activate(context: vscode.ExtensionContext) {
   statusBarItem.command = "sentryAutoFix.refreshIssues";
   context.subscriptions.push(statusBarItem);
 
-  // Initialize Sentry client, webview, and MCP server
-  initializeSentry().catch((error) => {
-    console.error("Failed to initialize Sentry:", error);
-  });
+  // Initialize stores
+  initializeStores();
 
   // Register configuration change handler
   context.subscriptions.push(
@@ -36,11 +34,16 @@ export function activate(context: vscode.ExtensionContext) {
       if (
         e.affectsConfiguration("sentryAutoFix.sentryUrl") ||
         e.affectsConfiguration("sentryAutoFix.apiToken") ||
-        e.affectsConfiguration("sentryAutoFix.projectSlugs")
+        e.affectsConfiguration("sentryAutoFix.projectSlugs") ||
+        e.affectsConfiguration("sentryAutoFix.clickupApiToken") ||
+        e.affectsConfiguration("sentryAutoFix.clickupTeamId") ||
+        e.affectsConfiguration("sentryAutoFix.clickupCustomFields") ||
+        e.affectsConfiguration("sentryAutoFix.clickupSelectedList") ||
+        e.affectsConfiguration("sentryAutoFix.clickupCompletedStatus") ||
+        e.affectsConfiguration("sentryAutoFix.clickupLanguage") ||
+        e.affectsConfiguration("sentryAutoFix.customPromptInstructions")
       ) {
-        initializeSentry().catch((error) => {
-          console.error("Failed to initialize Sentry:", error);
-        });
+        initializeStores();
       }
     })
   );
@@ -48,9 +51,9 @@ export function activate(context: vscode.ExtensionContext) {
   // Register commands
   context.subscriptions.push(
     vscode.commands.registerCommand("sentryAutoFix.refreshIssues", async () => {
-      if (!webviewProvider) {
+      if (!storeManager) {
         vscode.window.showWarningMessage(
-          "Please configure Sentry settings first (sentryUrl, apiToken, projectSlugs)"
+          "Please configure Sentry settings first"
         );
         return;
       }
@@ -58,7 +61,7 @@ export function activate(context: vscode.ExtensionContext) {
       statusBarItem.text = "$(sync~spin) Loading Sentry issues...";
       statusBarItem.show();
 
-      await webviewProvider.loadIssues();
+      await storeManager.refreshAll();
 
       statusBarItem.text = "$(check) Sentry";
       setTimeout(() => statusBarItem.hide(), 3000);
@@ -69,19 +72,39 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand(
       "sentryAutoFix.fixWithAI",
       async (data: any) => {
-        if (!webviewProvider || !sentryClient) {
+        if (!storeManager) {
           vscode.window.showWarningMessage("Sentry is not properly configured");
           return;
         }
 
-        // Get the issue from the data (can be from webview or tree node)
         const issue = data?.issue || data;
         if (!issue) {
           vscode.window.showErrorMessage("No issue selected");
           return;
         }
 
-        const fixCommand = new FixWithAICommand(sentryClient);
+        const sentryClient = storeManager.getSentryClient();
+        if (!sentryClient) {
+          vscode.window.showWarningMessage("Sentry client not available");
+          return;
+        }
+
+        // Get ClickUp language setting
+        const clickUpConfig = storeManager.getClickUpConfig();
+        const language = clickUpConfig?.language || "English";
+
+        // Get custom prompt instructions
+        const config = vscode.workspace.getConfiguration("sentryAutoFix");
+        const customPromptInstructions = config.get<string>(
+          "customPromptInstructions",
+          ""
+        );
+
+        const fixCommand = new FixWithAICommand(
+          sentryClient,
+          language,
+          customPromptInstructions
+        );
         await fixCommand.execute(issue);
       }
     )
@@ -100,6 +123,17 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("sentryAutoFix.openSettings", async () => {
+      // Open workspace settings by default
+      const config = vscode.workspace.getConfiguration("sentryAutoFix", null);
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "sentryAutoFix"
+      );
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand(
       "sentryAutoFix.showIssueDetails",
       async (issueId: string) => {
@@ -107,12 +141,25 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
 
-        const issue = webviewProvider.getIssueById(issueId);
+        const sentryClient = storeManager?.getSentryClient();
+        if (!sentryClient) {
+          return;
+        }
+
+        // Get issue from store
+        const issuesByProject = storeManager?.getSentryClient()
+          ? await storeManager.getSentryClient()?.fetchAllIssues()
+          : new Map();
+        let issue;
+        for (const issues of issuesByProject?.values() || []) {
+          issue = issues.find((i: any) => i.id === issueId);
+          if (issue) break;
+        }
+
         if (!issue) {
           return;
         }
 
-        // Show issue details in a quick pick
         const items = [
           { label: "$(bug) Fix with AI", action: "fix" },
           { label: "$(globe) Open in Sentry", action: "open" },
@@ -123,9 +170,27 @@ export function activate(context: vscode.ExtensionContext) {
         });
 
         if (selected) {
-          if (selected.action === "fix" && sentryClient) {
-            const fixCommand = new FixWithAICommand(sentryClient);
-            await fixCommand.execute(issue);
+          if (selected.action === "fix") {
+            const sentryClient = storeManager?.getSentryClient();
+            if (sentryClient) {
+              // Get ClickUp language setting
+              const clickUpConfig = storeManager.getClickUpConfig();
+              const language = clickUpConfig?.language || "English";
+
+              // Get custom prompt instructions
+              const config = vscode.workspace.getConfiguration("sentryAutoFix");
+              const customPromptInstructions = config.get<string>(
+                "customPromptInstructions",
+                ""
+              );
+
+              const fixCommand = new FixWithAICommand(
+                sentryClient,
+                language,
+                customPromptInstructions
+              );
+              await fixCommand.execute(issue);
+            }
           } else if (selected.action === "open") {
             vscode.env.openExternal(vscode.Uri.parse(issue.permalink));
           }
@@ -133,25 +198,52 @@ export function activate(context: vscode.ExtensionContext) {
       }
     )
   );
-
-  // Auto-load issues on activation if configured
-  if (isConfigured()) {
-    vscode.commands.executeCommand("sentryAutoFix.refreshIssues");
-  }
 }
 
-async function initializeSentry() {
-  const config = getConfiguration();
+function initializeStores() {
+  const sentryConfig = getSentryConfiguration();
+  const clickUpConfig = getClickUpConfiguration();
+  const isSentryConfigured =
+    sentryConfig.sentryUrl &&
+    sentryConfig.apiToken &&
+    sentryConfig.projectSlugs.length > 0;
 
-  const isConfigValid =
-    config.sentryUrl && config.apiToken && config.projectSlugs.length > 0;
+  if (!isSentryConfigured) {
+    statusBarItem.text = "$(warning) Sentry Not Configured";
+    statusBarItem.tooltip = "Click to configure Sentry settings";
+    statusBarItem.command = "workbench.action.openSettings";
+    statusBarItem.show();
 
-  // Always create webview provider (even if not configured)
+    // Clear stores if not configured
+    if (storeManager) {
+      storeManager.dispose();
+      storeManager = null;
+    }
+    return;
+  }
+
+  // Initialize store manager
+  if (!storeManager) {
+    storeManager = new StoreManager(extensionContext);
+
+    // Listen for store changes to update webview
+    storeManager.onDidChange(() => {
+      if (webviewProvider) {
+        webviewProvider.refresh();
+      }
+    });
+  }
+
+  // Initialize stores
+  storeManager.initialize(sentryConfig, clickUpConfig).catch((error) => {
+    console.error("Failed to initialize stores:", error);
+  });
+
+  // Initialize webview provider
   if (!webviewProvider) {
     webviewProvider = new SentryWebViewProvider(
       extensionContext.extensionUri,
-      null, // Pass null if not configured
-      extensionContext
+      storeManager
     );
     extensionContext.subscriptions.push(
       vscode.window.registerWebviewViewProvider(
@@ -159,95 +251,19 @@ async function initializeSentry() {
         webviewProvider
       )
     );
-
-    // Start background refresh (every 5 minutes) - only when configured
-    const refreshInterval = setInterval(() => {
-      if (webviewProvider && sentryClient) {
-        webviewProvider.loadIssues(true); // true = background refresh
-      }
-    }, 5 * 60 * 1000); // 5 minutes
-
-    extensionContext.subscriptions.push({
-      dispose: () => clearInterval(refreshInterval),
-    });
   }
 
-  if (!isConfigValid) {
-    statusBarItem.text = "$(warning) Sentry Not Configured";
-    statusBarItem.tooltip = "Click to configure Sentry settings";
-    statusBarItem.command = "workbench.action.openSettings";
-    statusBarItem.show();
-
-    sentryClient = null;
-    // Notify webview that configuration is missing
-    if (webviewProvider) {
-      webviewProvider.updateClient(null);
-    }
-    return;
-  }
-
-  // Create or update Sentry client
-  if (sentryClient) {
-    sentryClient.updateConfig(config);
-  } else {
-    sentryClient = new SentryClient(config);
-  }
-
-  // Update webview provider with the new client
-  if (webviewProvider) {
-    webviewProvider.updateClient(sentryClient);
-  }
-
-  // Create or update MCP server
+  // Initialize or update MCP server
   if (!mcpServer) {
-    mcpServer = new SentryMCPServer(config);
+    mcpServer = new SentryMCPServer(sentryConfig, storeManager);
   } else {
-    mcpServer.updateConfig(config);
+    mcpServer.updateConfig(sentryConfig, storeManager);
   }
 
   // Register MCP server with Cursor
-  try {
-    const mcpPath = vscode.Uri.joinPath(
-      extensionContext.extensionUri,
-      "dist",
-      "mcp-entry.js"
-    ).fsPath;
-
-    console.log("Registering MCP server at:", mcpPath);
-
-    // Check if Cursor MCP API exists
-    if (typeof (vscode as any).cursor?.mcp?.registerServer === "function") {
-      await (vscode as any).cursor.mcp.registerServer({
-        name: "sentry",
-        server: {
-          command: mcpPath, // Run as executable, not with node
-          args: [],
-          env: {
-            SENTRY_URL: config.sentryUrl,
-            SENTRY_API_TOKEN: config.apiToken,
-            SENTRY_PROJECT_SLUGS: config.projectSlugs.join(","),
-          },
-        },
-      });
-
-      console.log("✅ MCP server registered successfully");
-      vscode.window.showInformationMessage(
-        "✅ Sentry MCP server registered! Restart Cursor to enable AI access."
-      );
-    } else {
-      console.warn("⚠️ Cursor MCP API not available");
-      vscode.window.showWarningMessage(
-        "Cursor MCP API not found. Please upgrade Cursor or manually configure the MCP server."
-      );
-    }
-  } catch (error) {
-    console.error("❌ Failed to register MCP server:", error);
-    vscode.window.showErrorMessage(
-      `Failed to register MCP server: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
-  }
+  registerMCPServer().catch((error) => {
+    console.error("Failed to register MCP server:", error);
+  });
 
   statusBarItem.text = "$(check) Sentry Connected";
   statusBarItem.tooltip = "Click to refresh issues";
@@ -255,7 +271,65 @@ async function initializeSentry() {
   setTimeout(() => statusBarItem.hide(), 3000);
 }
 
-function getConfiguration(): SentryConfig {
+async function registerMCPServer() {
+  if (!storeManager) {
+    return;
+  }
+
+  const sentryConfig = getSentryConfiguration();
+  const clickUpConfig = getClickUpConfiguration();
+  const mcpPath = vscode.Uri.joinPath(
+    extensionContext.extensionUri,
+    "dist",
+    "mcp-entry.js"
+  ).fsPath;
+
+  console.log("Registering MCP server at:", mcpPath);
+
+  const env: Record<string, string> = {
+    SENTRY_URL: sentryConfig.sentryUrl,
+    SENTRY_API_TOKEN: sentryConfig.apiToken,
+    SENTRY_PROJECT_SLUGS: sentryConfig.projectSlugs.join(","),
+  };
+
+  // Add ClickUp config to environment if configured
+  if (clickUpConfig) {
+    env.CLICKUP_API_TOKEN = clickUpConfig.apiToken;
+    env.CLICKUP_TEAM_ID = clickUpConfig.teamId;
+    env.CLICKUP_COMPLETED_STATUS = clickUpConfig.completedStatusName;
+    env.CLICKUP_LANGUAGE = clickUpConfig.language;
+    if (clickUpConfig.selectedListId) {
+      env.CLICKUP_SELECTED_LIST = clickUpConfig.selectedListId;
+    }
+    if (Object.keys(clickUpConfig.customFields).length > 0) {
+      env.CLICKUP_CUSTOM_FIELDS = JSON.stringify(clickUpConfig.customFields);
+    }
+    console.log("✅ ClickUp config added to MCP server env");
+  } else {
+    console.log("⚠️ ClickUp not configured for MCP server");
+  }
+
+  if (typeof (vscode as any).cursor?.mcp?.registerServer === "function") {
+    await (vscode as any).cursor.mcp.registerServer({
+      name: "sentry",
+      server: {
+        command: mcpPath,
+        args: [],
+        env,
+      },
+    });
+
+    console.log("✅ MCP server registered successfully");
+    console.log("Environment variables:", Object.keys(env));
+    vscode.window.showInformationMessage(
+      "✅ Sentry MCP server registered! Restart Cursor to enable AI access."
+    );
+  } else {
+    console.warn("⚠️ Cursor MCP API not available");
+  }
+}
+
+function getSentryConfiguration(): SentryConfig {
   const config = vscode.workspace.getConfiguration("sentryAutoFix");
 
   return {
@@ -265,18 +339,36 @@ function getConfiguration(): SentryConfig {
   };
 }
 
-function isConfigured(): boolean {
-  const config = getConfiguration();
-  return !!(
-    config.sentryUrl &&
-    config.apiToken &&
-    config.projectSlugs.length > 0
-  );
+function getClickUpConfiguration(): ClickUpConfig | null {
+  const config = vscode.workspace.getConfiguration("sentryAutoFix");
+
+  const apiToken = config.get<string>("clickupApiToken", "");
+  const teamId = config.get<string>("clickupTeamId", "");
+
+  if (!apiToken || !teamId) {
+    return null;
+  }
+
+  return {
+    apiToken,
+    teamId,
+    customFields: config.get<Record<string, any>>("clickupCustomFields", {}),
+    selectedListId: config.get<string>("clickupSelectedList", ""),
+    completedStatusName: config.get<string>(
+      "clickupCompletedStatus",
+      "complete"
+    ),
+    language: config.get<string>("clickupLanguage", "English"),
+  };
 }
 
 export async function deactivate() {
   if (statusBarItem) {
     statusBarItem.dispose();
+  }
+
+  if (storeManager) {
+    storeManager.dispose();
   }
 
   // Unregister MCP server

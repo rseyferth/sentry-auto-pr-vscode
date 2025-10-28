@@ -26,6 +26,7 @@ export interface SentryIssue {
     value?: string;
     filename?: string;
   };
+  clickupTaskUrl?: string;
 }
 
 export interface SentryEvent {
@@ -81,4 +82,3 @@ export interface ExceptionValue {
   };
   stacktrace?: StackTrace;
 }
-

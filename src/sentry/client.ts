@@ -140,4 +140,83 @@ export class SentryClient {
       throw error;
     }
   }
+
+  /**
+   * Add a comment/note to a Sentry issue
+   */
+  async addIssueComment(issueId: string, text: string): Promise<boolean> {
+    try {
+      await this.axiosInstance.post(`/api/0/issues/${issueId}/comments/`, {
+        text,
+      });
+      return true;
+    } catch (error) {
+      console.error(`Failed to add comment to issue ${issueId}:`, error);
+      if (axios.isAxiosError(error)) {
+        throw new Error(
+          `Sentry API error: ${error.response?.status} ${error.response?.statusText}`
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Get comments for a Sentry issue
+   */
+  async getIssueComments(issueId: string): Promise<any[]> {
+    try {
+      const response = await this.axiosInstance.get(
+        `/api/0/issues/${issueId}/comments/`
+      );
+      return response.data || [];
+    } catch (error) {
+      console.error(`Failed to get comments for issue ${issueId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Parse comments to find ClickUp task URL
+   */
+  async parseClickUpUrlFromComments(issueId: string): Promise<string | null> {
+    try {
+      console.log(`[SentryClient] Fetching comments for issue ${issueId}...`);
+      const comments = await this.getIssueComments(issueId);
+      console.log(
+        `[SentryClient] Got ${comments.length} comments for issue ${issueId}`
+      );
+
+      // Look for ClickUp URLs in comments
+      for (const comment of comments) {
+        // Sentry comment text is stored in comment.data.text for note-type comments
+        const text = comment.data?.text || comment.text || "";
+        console.log(`[SentryClient] Comment type: ${comment.type}`);
+        console.log(`[SentryClient] Full comment text:`, text);
+        // Look for URLs containing "clickup.com"
+        const clickUpUrlMatch = text.match(
+          /https:\/\/app\.clickup\.com\/t\/[\w-]+/
+        );
+        if (clickUpUrlMatch) {
+          console.log(
+            `[SentryClient] Found ClickUp URL: ${clickUpUrlMatch[0]}`
+          );
+          return clickUpUrlMatch[0];
+        } else {
+          console.log(`[SentryClient] No ClickUp URL found in text: "${text}"`);
+        }
+      }
+
+      console.log(
+        `[SentryClient] No ClickUp URL found in ${comments.length} comments for issue ${issueId}`
+      );
+      return null;
+    } catch (error) {
+      console.error(
+        `[SentryClient] Failed to parse ClickUp URL from comments for issue ${issueId}:`,
+        error
+      );
+      return null;
+    }
+  }
 }

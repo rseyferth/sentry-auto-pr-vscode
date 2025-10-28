@@ -6,17 +6,57 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SentryClient } from "../sentry/client";
 import { SentryConfig, SentryIssue } from "../sentry/types";
+import { ClickUpClient } from "../clickup/client";
+import { StoreManager } from "../stores/storeManager";
 
 export class SentryMCPServer {
   private server: Server;
   private sentryClient: SentryClient;
+  private clickUpClient: ClickUpClient | null = null;
+  private storeManager: StoreManager | null = null;
+  private clickUpConfig: any | null = null;
 
-  constructor(config: SentryConfig) {
+  constructor(config: SentryConfig, storeManager?: StoreManager | null) {
+    this.storeManager = storeManager || null;
     this.sentryClient = new SentryClient(config);
+
+    // Try to get ClickUp config from storeManager first
+    const clickUpConfig = storeManager?.getClickUpConfig();
+    if (clickUpConfig) {
+      this.clickUpConfig = clickUpConfig;
+      this.clickUpClient = new ClickUpClient(clickUpConfig);
+      console.error(
+        "[MCP Server] ClickUp client initialized from storeManager"
+      );
+    } else if (!this.clickUpConfig) {
+      // Try to load from environment variables (for standalone MCP server)
+      if (process.env.CLICKUP_API_TOKEN && process.env.CLICKUP_TEAM_ID) {
+        const customFields = process.env.CLICKUP_CUSTOM_FIELDS
+          ? JSON.parse(process.env.CLICKUP_CUSTOM_FIELDS)
+          : {};
+
+        this.clickUpConfig = {
+          apiToken: process.env.CLICKUP_API_TOKEN,
+          teamId: process.env.CLICKUP_TEAM_ID,
+          customFields,
+          selectedListId: process.env.CLICKUP_SELECTED_LIST,
+          completedStatusName:
+            process.env.CLICKUP_COMPLETED_STATUS || "complete",
+          language: process.env.CLICKUP_LANGUAGE || "English",
+        };
+        this.clickUpClient = new ClickUpClient(this.clickUpConfig);
+        console.error(
+          "[MCP Server] ClickUp client initialized from environment"
+        );
+      } else {
+        console.error("[MCP Server] ClickUp not configured");
+      }
+    }
+
     this.server = new Server(
       {
         name: "sentry-mcp-server",
-        version: "0.1.0",
+        version: "0.2.0",
       },
       {
         capabilities: {
@@ -94,6 +134,45 @@ export class SentryMCPServer {
             required: ["issueId"],
           },
         },
+        {
+          name: "clickup_add_comment",
+          description:
+            "Add a comment to a ClickUp task. Use this to add summaries of problems, solutions, and testing instructions.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              taskId: {
+                type: "string",
+                description: "The ClickUp task ID",
+              },
+              comment: {
+                type: "string",
+                description: "The comment text to add",
+              },
+            },
+            required: ["taskId", "comment"],
+          },
+        },
+        {
+          name: "clickup_set_status",
+          description:
+            "Set the status of a ClickUp task (e.g., mark as complete when an issue is fixed).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              taskId: {
+                type: "string",
+                description: "The ClickUp task ID",
+              },
+              statusName: {
+                type: "string",
+                description:
+                  "The status name (defaults to 'complete' or configured completion status)",
+              },
+            },
+            required: ["taskId"],
+          },
+        },
       ],
     }));
 
@@ -114,6 +193,12 @@ export class SentryMCPServer {
 
           case "sentry_resolve_issue":
             return await this.resolveIssue(args);
+
+          case "clickup_add_comment":
+            return await this.addClickUpComment(args);
+
+          case "clickup_set_status":
+            return await this.setClickUpStatus(args);
 
           default:
             throw new Error(`Unknown tool: ${name}`);
@@ -372,8 +457,118 @@ export class SentryMCPServer {
     console.error("Sentry MCP Server running on stdio");
   }
 
-  updateConfig(config: SentryConfig) {
+  updateConfig(config: SentryConfig, storeManager?: StoreManager | null) {
     this.sentryClient.updateConfig(config);
+
+    // Update store manager reference if provided
+    if (storeManager !== undefined) {
+      this.storeManager = storeManager;
+    }
+
+    // Update ClickUp client if configured
+    const clickUpConfig =
+      this.storeManager?.getClickUpConfig() || this.clickUpConfig;
+    if (clickUpConfig) {
+      if (this.clickUpClient) {
+        this.clickUpClient.updateConfig(clickUpConfig);
+      } else {
+        this.clickUpClient = new ClickUpClient(clickUpConfig);
+        console.error(
+          "[MCP Server] ClickUp client initialized in updateConfig"
+        );
+      }
+    } else {
+      this.clickUpClient = null;
+    }
+  }
+
+  private async addClickUpComment(args: any) {
+    const taskId = args.taskId;
+    const comment = args.comment;
+
+    console.error("[MCP Server] addClickUpComment called with taskId:", taskId);
+    console.error("[MCP Server] Has clickUpClient:", !!this.clickUpClient);
+    console.error("[MCP Server] Has storeManager:", !!this.storeManager);
+
+    if (this.storeManager) {
+      const clickUpConfig = this.storeManager.getClickUpConfig();
+      console.error(
+        "[MCP Server] ClickUp config from storeManager:",
+        clickUpConfig ? "exists" : "null"
+      );
+
+      // Update ClickUp client from store manager if not initialized
+      if (!this.clickUpClient && clickUpConfig) {
+        console.error(
+          "[MCP Server] Initializing ClickUp client from storeManager"
+        );
+        this.clickUpClient = new ClickUpClient(clickUpConfig);
+      }
+    }
+
+    if (!taskId || !comment) {
+      throw new Error("taskId and comment are required");
+    }
+
+    if (!this.clickUpClient) {
+      throw new Error("ClickUp is not configured");
+    }
+
+    await this.clickUpClient.addComment(taskId, comment);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `✅ Comment added to ClickUp task ${taskId}`,
+        },
+      ],
+    };
+  }
+
+  private async setClickUpStatus(args: any) {
+    const taskId = args.taskId;
+    const statusName = args.statusName;
+
+    console.error("[MCP Server] setClickUpStatus called with taskId:", taskId);
+    console.error("[MCP Server] Has clickUpClient:", !!this.clickUpClient);
+    console.error("[MCP Server] Has storeManager:", !!this.storeManager);
+
+    if (this.storeManager) {
+      const clickUpConfig = this.storeManager.getClickUpConfig();
+      console.error(
+        "[MCP Server] ClickUp config from storeManager:",
+        clickUpConfig ? "exists" : "null"
+      );
+
+      // Update ClickUp client from store manager if not initialized
+      if (!this.clickUpClient && clickUpConfig) {
+        console.error(
+          "[MCP Server] Initializing ClickUp client from storeManager"
+        );
+        this.clickUpClient = new ClickUpClient(clickUpConfig);
+      }
+    }
+
+    if (!taskId) {
+      throw new Error("taskId is required");
+    }
+
+    if (!this.clickUpClient) {
+      throw new Error("ClickUp is not configured");
+    }
+
+    await this.clickUpClient.updateTaskStatus(taskId, statusName);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `✅ ClickUp task ${taskId} status set to "${
+            statusName || "complete"
+          }"`,
+        },
+      ],
+    };
   }
 }
-

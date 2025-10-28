@@ -8,7 +8,11 @@ import {
 } from "../sentry/types";
 
 export class FixWithAICommand {
-  constructor(private sentryClient: SentryClient) {}
+  constructor(
+    private sentryClient: SentryClient,
+    private clickUpLanguage: string = "English",
+    private customPromptInstructions: string = ""
+  ) {}
 
   async execute(issue: SentryIssue): Promise<void> {
     try {
@@ -52,6 +56,12 @@ export class FixWithAICommand {
     sections.push(`**Event Count:** ${issue.count} events`);
     sections.push(`**Users Affected:** ${issue.userCount}`);
     sections.push(`**Link:** ${issue.permalink}`);
+
+    // Add ClickUp task link if available
+    if (issue.clickupTaskUrl) {
+      sections.push(`**ClickUp Task:** ${issue.clickupTaskUrl}`);
+    }
+
     sections.push("");
 
     // Error message
@@ -135,9 +145,52 @@ export class FixWithAICommand {
       "3. Explain why this error occurred and how to prevent it in the future"
     );
     sections.push("");
+
+    // Add ClickUp task handling instructions if present
+    if (issue.clickupTaskUrl) {
+      sections.push("## ClickUp Task Handling");
+      sections.push("");
+      sections.push(
+        `**Important:** This Sentry issue has an associated ClickUp task: ${issue.clickupTaskUrl}`
+      );
+      sections.push("");
+      sections.push(
+        `**Comment Language:** Write all ClickUp comments in ${this.clickUpLanguage}.`
+      );
+      sections.push("");
+      sections.push("When the user indicates that the issue is fixed");
+      sections.push(
+        "1. Use the `clickup_add_comment` MCP tool to add a concise comment describing:"
+      );
+      sections.push("   - The problem you found");
+      sections.push("   - How you fixed it");
+      sections.push(
+        "   - The expected impact/behavior so testers know what to expect"
+      );
+      sections.push(
+        "2. Use the `clickup_set_status` MCP tool to mark the task as completed"
+      );
+      sections.push("");
+      sections.push(
+        'Write the comment in the configured language, with a non-technical audience in mind. Example format: "Problem: [description]. Solution: [fix applied]. Expected impact: [which flows should the testers pay attention to]."'
+      );
+      sections.push("");
+      sections.push(
+        "Only add the comment when the user indicates that the issue is fixed, and only when the user is satisfied with the fix. You can ask for confirmation when you think you've fixed the issue, so it's clear for the user that you will finish the task in ClickUp."
+      );
+    }
+
     sections.push(
       "If you need to see more context from the codebase, please ask or search for the relevant files."
     );
+
+    // Add custom prompt instructions if provided
+    if (this.customPromptInstructions.trim()) {
+      sections.push("");
+      sections.push("## Additional Instructions");
+      sections.push("");
+      sections.push(this.customPromptInstructions.trim());
+    }
 
     return sections.join("\n");
   }

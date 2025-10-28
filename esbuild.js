@@ -16,6 +16,9 @@ async function main() {
     outfile: 'dist/extension.js',
     external: ['vscode'],
     logLevel: 'silent',
+    banner: {
+      js: `'use strict';`
+    },
     plugins: [
       {
         name: 'watch-plugin',
@@ -35,11 +38,58 @@ async function main() {
     ],
   });
 
+  // Build webview React app
+  const webviewCtx = await esbuild.context({
+    entryPoints: ['src/webview/index.tsx'],
+    bundle: true,
+    format: 'iife',
+    minify: production,
+    sourcemap: !production,
+    sourcesContent: false,
+    platform: 'browser',
+    outfile: 'dist/webview.js',
+    logLevel: 'silent',
+    jsx: 'automatic',
+    loader: {
+      '.css': 'text',
+    },
+    plugins: [
+      {
+        name: 'css-loader',
+        setup(build) {
+          build.onLoad({ filter: /\.css$/ }, async (args) => {
+            const fs = require('fs');
+            const text = await fs.promises.readFile(args.path, 'utf8');
+            return {
+              contents: `const style = document.createElement('style'); style.textContent = ${JSON.stringify(text)}; document.head.appendChild(style);`,
+              loader: 'js',
+            };
+          });
+        },
+      },
+      {
+        name: 'watch-plugin-webview',
+        setup(build) {
+          build.onStart(() => {
+            console.log('[watch] webview build started');
+          });
+          build.onEnd((result) => {
+            if (result.errors.length > 0) {
+              console.error('[watch] webview build failed:', result.errors);
+            } else {
+              console.log('[watch] webview build succeeded');
+            }
+          });
+        },
+      },
+    ],
+  });
+
   // Build MCP server
   const mcpCtx = await esbuild.context({
     entryPoints: ['src/mcp/mcp-entry.ts'],
     bundle: true,
-    format: 'cjs', // Use CommonJS format for better compatibility
+    format: 'cjs',
     minify: production,
     sourcemap: !production,
     sourcesContent: false,
@@ -71,6 +121,7 @@ async function main() {
 
   if (watch) {
     await extensionCtx.watch();
+    await webviewCtx.watch();
     await mcpCtx.watch();
     
     // Make MCP entry executable on first build
@@ -84,8 +135,10 @@ async function main() {
     console.log('👀 Watching for changes... (Press Cmd+R / Ctrl+R in Extension Development Host to reload)');
   } else {
     await extensionCtx.rebuild();
+    await webviewCtx.rebuild();
     await mcpCtx.rebuild();
     await extensionCtx.dispose();
+    await webviewCtx.dispose();
     await mcpCtx.dispose();
     
     // Make MCP entry executable
